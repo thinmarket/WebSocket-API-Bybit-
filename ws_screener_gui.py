@@ -18,28 +18,28 @@ FUT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
 FUT_SYMBOLS_URL = "https://api.bybit.com/v5/market/instruments-info?category=linear"
 
 # Индексы колонок с числами для сортировки
-NUMERIC_COLS_ALL = {2, 3, 4, 5, 6, 7}
+NUMERIC_COLS_ALL = {2, 3, 4, 5, 6, 7, 8, 9}
 NUMERIC_COLS_SPOT = {1, 2, 3, 4}
-NUMERIC_COLS_FUT = {1, 2, 3, 4, 5, 6, 7}
+NUMERIC_COLS_FUT = {1, 2, 3, 4, 5, 6, 7, 8}
 
 COLUMNS_ALL = [
-    "Тикер", "Тип", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Mark Price", "Index Price", "Открытый интерес"
+    "Тикер", "Тип", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Mark Price", "Index Price", "Открытый интерес", "Фандинг / До списания"
 ]
 COLUMNS_SPOT = [
-    "Тикер", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч"
+    "Тикер", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Фандинг / До списания"
 ]
 COLUMNS_FUT = [
-    "Тикер", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Mark Price", "Index Price", "Открытый интерес"
+    "Тикер", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Mark Price", "Index Price", "Открытый интерес", "Фандинг / До списания"
 ]
 
 COLUMN_KEYS_ALL = [
-    'symbol', 'type', 'lastPrice', 'price24hPcnt', 'volume24h', 'turnover24h', 'markPrice', 'indexPrice', 'openInterestValue'
+    'symbol', 'type', 'lastPrice', 'price24hPcnt', 'volume24h', 'turnover24h', 'markPrice', 'indexPrice', 'openInterestValue', 'funding_info'
 ]
 COLUMN_KEYS_SPOT = [
-    'symbol', 'lastPrice', 'price24hPcnt', 'volume24h', 'turnover24h'
+    'symbol', 'lastPrice', 'price24hPcnt', 'volume24h', 'turnover24h', 'funding_info'
 ]
 COLUMN_KEYS_FUT = [
-    'symbol', 'lastPrice', 'price24hPcnt', 'volume24h', 'turnover24h', 'markPrice', 'indexPrice', 'openInterestValue'
+    'symbol', 'lastPrice', 'price24hPcnt', 'volume24h', 'turnover24h', 'markPrice', 'indexPrice', 'openInterestValue', 'funding_info'
 ]
 
 def format_ts(ts):
@@ -162,6 +162,8 @@ class ScreenerTab(QWidget):
             for col, key in enumerate(self.column_keys):
                 value = d.get(key, '')
                 # Форматируем только для отображения
+                if key == 'funding_info':
+                    value = d.get('funding_info', '')
                 if key == 'price24hPcnt' and value not in ('', None):
                     try:
                         percent = float(value) * 100
@@ -298,6 +300,9 @@ class SpotFuturesScreener(QMainWindow):
                 'markPrice': '',
                 'indexPrice': '',
                 'openInterestValue': '',
+                'fundingRate': '',
+                'nextFundingTime': '',
+                'funding_info': '',
             }
         self.loop.create_task(self.ws_spot(self.spot_symbols))
         self.loop.create_task(self.ws_fut(self.fut_symbols))
@@ -351,10 +356,34 @@ class SpotFuturesScreener(QMainWindow):
         else:
             fut = self.data_fut.get(symbol)
             if fut is not None:
-                for key in ['lastPrice', 'price24hPcnt', 'volume24h', 'turnover24h', 'markPrice', 'indexPrice', 'openInterestValue']:
+                for key in ['lastPrice', 'price24hPcnt', 'volume24h', 'turnover24h', 'markPrice', 'indexPrice', 'openInterestValue', 'fundingRate', 'nextFundingTime']:
                     new_val = data.get(key)
                     if new_val not in (None, ''):
                         fut[key] = new_val
+                # Формируем строку для funding_info
+                try:
+                    rate = float(fut.get('fundingRate', 0))
+                    rate_str = f"{rate * 100:.4f}%"
+                except Exception:
+                    rate_str = ''
+                try:
+                    ts = int(fut.get('nextFundingTime', 0))
+                    if ts:
+                        # Используем ts из текущего сообщения, если есть, иначе self.last_broker_ts, иначе локальное время
+                        now = data.get('ts', self.last_broker_ts or int(datetime.utcnow().timestamp() * 1000))
+                        delta = ts - now
+                        if delta > 0:
+                            hours = delta // 3600000
+                            minutes = (delta % 3600000) // 60000
+                            seconds = (delta % 60000) // 1000
+                            time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
+                        else:
+                            time_str = "00:00:00"
+                    else:
+                        time_str = ''
+                except Exception:
+                    time_str = ''
+                fut['funding_info'] = f"{rate_str} / {time_str}" if rate_str or time_str else ''
         if 'ts' in msg:
             self.last_broker_ts = msg['ts']
             self.time_label.setText(f"Время брокера: {format_ts(self.last_broker_ts)}")
@@ -376,6 +405,7 @@ class SpotFuturesScreener(QMainWindow):
                 'markPrice': '',
                 'indexPrice': '',
                 'openInterestValue': '',
+                'funding_info': '',
             }
         for symbol in self.fut_symbols:
             d = self.data_fut.get(symbol, {})
@@ -391,6 +421,7 @@ class SpotFuturesScreener(QMainWindow):
                 'markPrice': d.get('markPrice', ''),
                 'indexPrice': d.get('indexPrice', ''),
                 'openInterestValue': d.get('openInterestValue', ''),
+                'funding_info': d.get('funding_info', ''),
             }
         self.tab_all.update_data(all_data)
         self.tab_spot.update_data(self.data_spot)
