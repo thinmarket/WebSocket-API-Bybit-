@@ -2,7 +2,7 @@ import sys
 import asyncio
 import aiohttp
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QLabel, QHBoxLayout, QTabWidget, QHeaderView, QPushButton
+    QApplication, QMainWindow, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QLabel, QHBoxLayout, QTabWidget, QHeaderView, QPushButton, QCheckBox
 )
 from PyQt5.QtCore import QTimer, Qt, QUrl
 from datetime import datetime
@@ -23,13 +23,13 @@ NUMERIC_COLS_SPOT = {1, 2, 3, 4}
 NUMERIC_COLS_FUT = {1, 2, 3, 4, 5, 6, 7, 8}
 
 COLUMNS_ALL = [
-    "Тикер", "Тип", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Mark Price", "Index Price", "Открытый интерес", "Фандинг / До списания"
+    "Тикер", "Тип", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Mark Price", "Index Price", "Открытый интерес", "Ставка / Отсчет до"
 ]
 COLUMNS_SPOT = [
-    "Тикер", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Фандинг / До списания"
+    "Тикер", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Ставка / Отсчет до"
 ]
 COLUMNS_FUT = [
-    "Тикер", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Mark Price", "Index Price", "Открытый интерес", "Фандинг / До списания"
+    "Тикер", "Последняя цена", "% за 24ч", "Объём 24ч", "Оборот 24ч", "Mark Price", "Index Price", "Открытый интерес", "Ставка / Отсчет до"
 ]
 
 COLUMN_KEYS_ALL = [
@@ -78,36 +78,33 @@ class CustomHeader(QHeaderView):
         painter.drawText(rect, Qt.AlignCenter, str(text))
         painter.restore()
 
-class ChartDialog(QDialog):
-    def __init__(self, tv_symbol, parent=None):
+class FundingAlertDialog(QDialog):
+    def __init__(self, ticker, time_left, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"График {tv_symbol}")
-        self.resize(400, 150)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setStyleSheet("background: #232629; color: #fff; border-radius: 8px; padding: 16px;")
+        self.setFixedSize(320, 80)
         layout = QVBoxLayout(self)
-        label = QLabel(f"График будет открыт во внешнем браузере:\n{tv_symbol}")
+        label = QLabel(f"<b>{ticker}</b>: до фандинга осталось <b>{time_left}</b>")
+        label.setStyleSheet("font-size: 18px;")
         layout.addWidget(label)
-        btn = QPushButton("Открыть график в браузере")
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: #444;
-                color: #fff;
-                font-weight: bold;
-                font-size: 16px;
-                border-radius: 6px;
-                padding: 10px 20px;
-                margin-top: 20px;
-            }
-            QPushButton:hover {
-                background-color: #666;
-            }
-        """)
-        layout.addWidget(btn)
-        url = f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
-        btn.clicked.connect(lambda: webbrowser.open(url))
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.accept)
+        self.timer.start(5000)  # 5 секунд показываем
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Позиционируем в левый нижний угол
+        parent = self.parentWidget() or self.window()
+        if parent:
+            geo = parent.geometry()
+            self.move(geo.x() + 20, geo.y() + geo.height() - self.height() - 20)
 
 class ScreenerTab(QWidget):
-    def __init__(self, columns, column_keys, numeric_cols):
-        super().__init__()
+    def __init__(self, columns, column_keys, numeric_cols, parent=None, funding_alerts_enabled_ref=None):
+        super().__init__(parent)
         self.table = QTableWidget(0, len(columns))
         # Заменяем стандартный заголовок на кастомный
         self.table.setHorizontalHeader(CustomHeader(Qt.Horizontal, self.table))
@@ -116,6 +113,16 @@ class ScreenerTab(QWidget):
         self.table.setSelectionMode(QTableWidget.NoSelection)  # Полностью убираем выделение
         self.table.verticalHeader().setVisible(False)  # Скрываем нумерацию строк
         layout = QVBoxLayout()
+        # --- Добавляем чекбокс в заголовок колонки 'Фандинг / До списания' ---
+        self.funding_alerts_enabled_ref = funding_alerts_enabled_ref
+        header_layout = QHBoxLayout()
+        header_layout.addStretch(1)
+        if self.funding_alerts_enabled_ref is not None:
+            self.alert_checkbox = QCheckBox("Уведомлять о фандинге")
+            self.alert_checkbox.setChecked(self.funding_alerts_enabled_ref[0])
+            self.alert_checkbox.stateChanged.connect(self.on_alert_checkbox_changed)
+            header_layout.addWidget(self.alert_checkbox)
+        layout.addLayout(header_layout)
         layout.addWidget(self.table)
         self.setLayout(layout)
         self.column_keys = column_keys
@@ -128,6 +135,11 @@ class ScreenerTab(QWidget):
         self._last_symbols = []  # для сохранения порядка без сортировки
         self.table.horizontalHeader().setFocusPolicy(Qt.NoFocus)  # Отключаем фокус у заголовка
         self.table.cellClicked.connect(self.handle_cell_click)
+        self._alerted_symbols = set()
+
+    def on_alert_checkbox_changed(self, state):
+        if self.funding_alerts_enabled_ref is not None:
+            self.funding_alerts_enabled_ref[0] = bool(state)
 
     def handle_cell_click(self, row, col):
         if self.column_keys[col] == 'symbol':
@@ -199,6 +211,8 @@ class ScreenerTab(QWidget):
                     except Exception:
                         pass
                 self.table.setItem(row, col, item)
+        # После обновления таблицы проверяем условия для уведомлений
+        self.check_funding_alerts()
 
     def handle_sort(self, col):
         if self.current_sort_col == col:
@@ -228,15 +242,67 @@ class ScreenerTab(QWidget):
         # После сортировки фиксируем порядок до следующего клика
         return sorted(self.data_cache.keys(), key=sort_key, reverse=(order == Qt.DescendingOrder))
 
+    def check_funding_alerts(self):
+        if not self.funding_alerts_enabled_ref or not self.funding_alerts_enabled_ref[0]:
+            self._alerted_symbols.clear()
+            return
+        for symbol, d in self.data_cache.items():
+            # Только для фьючерсов
+            if d.get('type', 'futures') != 'futures':
+                continue
+            funding_info = d.get('funding_info', '')
+            if not funding_info or '/' not in funding_info:
+                continue
+            try:
+                time_str = funding_info.split('/')[-1].strip()
+                h, m, s = map(int, time_str.split(':'))
+                total_sec = h * 3600 + m * 60 + s
+            except Exception:
+                continue
+            if 0 < total_sec <= 300 and symbol not in self._alerted_symbols:
+                dlg = FundingAlertDialog(d.get('symbol', symbol), time_str, self)
+                dlg.show()
+                self._alerted_symbols.add(symbol)
+            elif total_sec > 300 and symbol in self._alerted_symbols:
+                self._alerted_symbols.remove(symbol)
+
+class ChartDialog(QDialog):
+    def __init__(self, tv_symbol, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"График {tv_symbol}")
+        self.resize(400, 150)
+        layout = QVBoxLayout(self)
+        label = QLabel(f"График будет открыт во внешнем браузере:\n{tv_symbol}")
+        layout.addWidget(label)
+        btn = QPushButton("Открыть график в браузере")
+        btn.setStyleSheet("""
+            QPushButton {
+                background-color: #444;
+                color: #fff;
+                font-weight: bold;
+                font-size: 16px;
+                border-radius: 6px;
+                padding: 10px 20px;
+                margin-top: 20px;
+            }
+            QPushButton:hover {
+                background-color: #666;
+            }
+        """)
+        layout.addWidget(btn)
+        url = f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
+        btn.clicked.connect(lambda: webbrowser.open(url))
+
 class SpotFuturesScreener(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Bybit Скринер (Спот и Фьючерсы, WebSocket, Mainnet)")
         self.setGeometry(100, 100, 1600, 800)
+        self.funding_alerts_enabled = [True]  # Используем список для передачи по ссылке
         self.tabs = QTabWidget()
-        self.tab_all = ScreenerTab(COLUMNS_ALL, COLUMN_KEYS_ALL, NUMERIC_COLS_ALL)
-        self.tab_spot = ScreenerTab(COLUMNS_SPOT, COLUMN_KEYS_SPOT, NUMERIC_COLS_SPOT)
-        self.tab_fut = ScreenerTab(COLUMNS_FUT, COLUMN_KEYS_FUT, NUMERIC_COLS_FUT)
+        self.tab_all = ScreenerTab(COLUMNS_ALL, COLUMN_KEYS_ALL, NUMERIC_COLS_ALL, parent=self, funding_alerts_enabled_ref=self.funding_alerts_enabled)
+        self.tab_spot = ScreenerTab(COLUMNS_SPOT, COLUMN_KEYS_SPOT, NUMERIC_COLS_SPOT, parent=self, funding_alerts_enabled_ref=self.funding_alerts_enabled)
+        self.tab_fut = ScreenerTab(COLUMNS_FUT, COLUMN_KEYS_FUT, NUMERIC_COLS_FUT, parent=self, funding_alerts_enabled_ref=self.funding_alerts_enabled)
         self.tabs.addTab(self.tab_all, "Все")
         self.tabs.addTab(self.tab_spot, "Спот")
         self.tabs.addTab(self.tab_fut, "Фьючерсы")
